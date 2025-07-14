@@ -8,9 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httputil"
+	"os"
 	"strings"
 	"time"
 
@@ -155,26 +158,49 @@ func (a *AWSAuth) Login(ctx context.Context, client *api.Client) (*api.Secret, e
 		if err != nil {
 			return nil, fmt.Errorf("failed to construct STS request: %w", err)
 		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+		req.Header.Set("Host", req.URL.Host)
 
 		hash := sha256.Sum256([]byte(iamBody))
 		payloadHash := hex.EncodeToString(hash[:])
 
 		signer := v4.NewSigner()
 		err = signer.SignHTTP(ctx, credsVal, req, payloadHash, "sts", a.region, time.Now().UTC())
+		dump, err := httputil.DumpRequestOut(req, true)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error dumping signed request: %v\n", err)
+		} else {
+			fmt.Println("==== BEGIN Signed STS Request ====")
+			fmt.Println(string(dump))
+			fmt.Println("==== END Signed STS Request ====")
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to sign STS request: %w", err)
 		}
-
+		fmt.Println("=== Signed IAM Headers ===")
+		for k, v := range req.Header {
+			fmt.Printf("%s: %s\n", k, strings.Join(v, ","))
+		}
 		headers := make(map[string]string)
 		for k, v := range req.Header {
-			headers[k] = base64.StdEncoding.EncodeToString([]byte(strings.Join(v, ",")))
+			headerValue := strings.Join(v, ",")
+			headers[k] = base64.StdEncoding.EncodeToString([]byte(headerValue))
 		}
 
 		loginData["iam_http_request_method"] = "POST"
 		loginData["iam_request_url"] = base64.StdEncoding.EncodeToString([]byte(req.URL.String()))
 		loginData["iam_request_body"] = base64.StdEncoding.EncodeToString([]byte(iamBody))
 		loginData["iam_request_headers"] = headers
+		fmt.Println("==== IAM REQUEST BODY (decoded) ====")
+		decodedBody, _ := base64.StdEncoding.DecodeString(loginData["iam_request_body"].(string))
+		fmt.Println(string(decodedBody))
+		
+		fmt.Println("==== IAM SIGNED HEADERS (decoded) ====")
+		for k, v := range loginData["iam_request_headers"].(map[string]string) {
+			val, _ := base64.StdEncoding.DecodeString(v)
+			fmt.Printf("%s: %s\n", k, val)
+		}		
+		fmt.Printf("SIGNED HEADERS: %s\n", req.Header)
 	}
 
 	if a.roleName != "" {
@@ -186,6 +212,8 @@ func (a *AWSAuth) Login(ctx context.Context, client *api.Client) (*api.Secret, e
 	}
 
 	path := fmt.Sprintf("auth/%s/login", a.mountPath)
+	payloadJSON, _ := json.MarshalIndent(loginData, "", "  ")
+	fmt.Println(string(payloadJSON))	
 	resp, err := client.Logical().WriteWithContext(ctx, path, loginData)
 	if err != nil {
 		return nil, fmt.Errorf("unable to log in with AWS auth: %w", err)
